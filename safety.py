@@ -59,18 +59,42 @@ def check_and_fix(customer_reply: str) -> tuple[str, list[str]]:
     return reply.strip(), violations
 
 
-def is_prompt_injection(complaint: str) -> bool:
-    """Detect obvious prompt injection patterns in complaint text."""
-    patterns = [
-        r"ignore (previous|all|above|prior|system) (instructions?|rules?|prompts?)",
-        r"(disregard|forget|override).{0,30}(instructions?|rules?|system)",
-        r"you are now",
-        r"pretend (you are|to be)",
-        r"new (instructions?|rules?|system prompt)",
-        r"act as (if you are|a|an)",
+_INJECTION_PATTERNS = re.compile(
+    "|".join([
+        # Classic ignore-rules patterns
+        r"ignore (previous|all|above|prior|system|the) (instructions?|rules?|prompts?|constraints?)",
+        r"(disregard|forget|override|bypass|skip).{0,30}(instructions?|rules?|system|constraints?|safety)",
+        r"do not follow (previous|the|any|your) (instructions?|rules?)",
+        # Role/persona hijacking
+        r"you are now\b",
+        r"pretend (you are|to be|that you)",
+        r"act as (if you are|a |an |though)",
+        r"(roleplay|role.play) as",
+        r"from now on (you are|act|behave|respond)",
+        r"your new (role|persona|instructions?|task)",
+        # System prompt injection
+        r"new (instructions?|rules?|system prompt|task|directive)",
+        r"\[?system\]?:?\s*(new|updated|override)",
+        r"<(system|instructions?|prompt)>",
+        # DAN / jailbreak
         r"jailbreak",
         r"do anything now",
         r"developer mode",
-    ]
-    combined = re.compile("|".join(patterns), re.IGNORECASE)
-    return bool(combined.search(complaint))
+        r"dan mode",
+        r"unrestricted mode",
+        r"(enable|activate|turn on).{0,20}(unrestricted|jailbreak|dan)",
+        # Output manipulation
+        r"(respond|reply|answer|output).{0,30}(without|ignore|skip).{0,30}(safety|filter|rule|restriction)",
+        r"(confirm|approve|process).{0,20}(refund|reversal|transfer).{0,20}(immediately|now|directly)",
+        r"tell (the customer|user|them).{0,30}(refund|reversed|approved|confirmed)",
+        # Hidden instruction markers
+        r"---.{0,10}(begin|start|end|stop).{0,10}---",
+        r"\[\[.{0,50}\]\]",
+    ]),
+    re.IGNORECASE,
+)
+
+
+def is_prompt_injection(complaint: str) -> bool:
+    """Detect prompt injection attempts embedded in complaint text."""
+    return bool(_INJECTION_PATTERNS.search(complaint))
