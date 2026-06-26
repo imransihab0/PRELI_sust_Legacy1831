@@ -52,8 +52,10 @@ def check_and_fix(customer_reply: str) -> tuple[str, list[str]]:
             reply,
         )
 
-    # Ensure PIN/OTP reminder is present
-    if not re.search(r"\b(pin|otp)\b", reply, re.IGNORECASE):
+    # Ensure PIN/OTP reminder is present (check both English and Bangla)
+    has_reminder = re.search(r"\b(pin|otp)\b", reply, re.IGNORECASE) or \
+                   re.search(r"(পিন|ওটিপি)", reply)
+    if not has_reminder:
         reply = reply.rstrip() + _SAFE_CREDENTIAL_SUFFIX
 
     return reply.strip(), violations
