@@ -20,9 +20,9 @@ Analyze one support ticket at a time. Read both the complaint text AND the trans
    - SAME-COUNTERPARTY REPEAT: If multiple transactions go to the SAME counterparty, pick the most recent one matching the complaint amount. Multiple prior transfers to the same recipient makes a "wrong transfer" claim INCONSISTENT (established pattern).
    - For duplicate_payment: point to the SECOND (suspected duplicate) transaction.
 2. Judge evidence_verdict:
-   - "consistent": data supports the complaint. IMPORTANT: a transaction with status "pending" when the customer says they haven't received funds IS consistent (the pending status explains the non-receipt).
-   - "inconsistent": data contradicts the complaint (e.g., multiple prior transfers to the same recipient undermine a wrong-transfer claim; a transaction shows "completed" but customer claims it never happened).
-   - "insufficient_data": history is empty, complaint is vague with no matching transaction, OR multiple transactions match equally with DIFFERENT counterparties and more info is needed.
+   - "consistent": the identified transaction supports and explains the complaint (amount matches, timing matches, type matches). IMPORTANT: "pending" status when customer says funds not received = consistent. Unrelated transactions elsewhere in history do NOT make the verdict inconsistent.
+   - "inconsistent": the transaction data for the matched transaction SPECIFICALLY contradicts the complaint. Example: customer says "wrong transfer" but history shows 3 prior transfers to that SAME recipient (established pattern). Do NOT use inconsistent just because other unrelated transactions exist in history.
+   - "insufficient_data": history is empty, complaint is vague with no matching transaction, OR multiple transactions of same amount going to DIFFERENT counterparties make it impossible to pick one.
 3. When relevant_transaction_id is null due to ambiguity: set evidence_verdict to "insufficient_data", severity to "medium", human_review_required to false, and ask for the missing detail in customer_reply.
 
 ## ENUMS — USE EXACT VALUES ONLY
@@ -33,11 +33,13 @@ evidence_verdict: consistent | inconsistent | insufficient_data
 
 ## ROUTING GUIDE
 wrong_transfer → dispute_resolution, high severity, human_review true
-payment_failed → payments_ops, high severity
+payment_failed → payments_ops, high severity (transaction type="payment", status="failed")
 refund_request (change of mind, no service failure) → customer_support, low severity
 duplicate_payment → payments_ops, high severity, human_review true
 merchant_settlement_delay → merchant_operations, medium severity
 agent_cash_in_issue → agent_operations, high severity, human_review true
+  ↳ TRIGGERS WHEN: transaction type="cash_in" AND counterparty starts with "AGENT-", OR complaint mentions depositing cash through an agent/এজেন্ট that hasn't reflected in balance
+  ↳ Do NOT classify this as payment_failed — it is a cash deposit through an agent, not a payment
 phishing_or_social_engineering → fraud_risk, critical severity, human_review true, relevant_transaction_id null
 other / vague → customer_support, low severity
 
@@ -162,19 +164,39 @@ def _build_user_message(req: TicketRequest) -> str:
     return f"Analyze this support ticket:{injection_flag}\n\n{json.dumps(ticket, ensure_ascii=False, indent=2)}"
 
 
-async def analyze_ticket(req: TicketRequest) -> TicketResponse:
-    user_message = _build_user_message(req)
+def _call_groq(messages: list) -> object:
+    """Blocking Groq call — run in a thread via asyncio.to_thread."""
+    import time as _time
+    from groq import RateLimitError
+    import logging
 
-    response = _client.chat.completions.create(
-        model=_MODEL,
-        max_tokens=1024,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        tools=[ANALYZE_TOOL],
-        tool_choice={"type": "function", "function": {"name": "submit_investigation"}},
-    )
+    last_exc = None
+    for attempt in range(3):
+        try:
+            return _client.chat.completions.create(
+                model=_MODEL,
+                max_tokens=1024,
+                messages=messages,
+                tools=[ANALYZE_TOOL],
+                tool_choice={"type": "function", "function": {"name": "submit_investigation"}},
+            )
+        except RateLimitError as e:
+            last_exc = e
+            wait = 10 * (attempt + 1)
+            logging.getLogger(__name__).warning("Rate limit, retrying in %ss", wait)
+            _time.sleep(wait)
+    raise last_exc
+
+
+async def analyze_ticket(req: TicketRequest) -> TicketResponse:
+    import asyncio
+
+    user_message = _build_user_message(req)
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+    response = await asyncio.to_thread(_call_groq, messages)
 
     tool_calls = response.choices[0].message.tool_calls
     if not tool_calls:
